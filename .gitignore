@@ -1,4 +1,6 @@
 ./data
+./config
 *.png
 *.jpg
 *.csv
+*.npy

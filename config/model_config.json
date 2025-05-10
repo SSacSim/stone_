@@ -1,0 +1,8 @@
+{
+    "img_size" : 360,
+    "epochs" : 5,
+    "lr" : 3e-4,
+    "batch_size" : 32,
+    "seed" : 1042,
+    "save_path" : "./save"
+}
