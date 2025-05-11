@@ -39,7 +39,7 @@ def cleanup():
 CFG = {
     'IMG_SIZE': 448,
     'EPOCHS': 15,
-    'LEARNING_RATE': 1e-4,
+    'LEARNING_RATE': 1e-5,
     'BATCH_SIZE': 8,
     'SEED': 42,
     'NUM_CLASSES': 7,
@@ -80,12 +80,15 @@ class CustomDataset(Dataset):
 class LitModel(nn.Module):
     def __init__(self, model_name, num_classes):
         super().__init__()
-        self.model = timm.create_model(model_name, pretrained=True, num_classes=num_classes)
+        self.backbone = timm.create_model(model_name, pretrained=True)
+        self.classifier = nn.Linear(1000, num_classes)
         self.criterion = nn.CrossEntropyLoss()
         self.f1 = MulticlassF1Score(num_classes=num_classes, average="macro")
 
     def forward(self, x):
-        return self.model(x)
+        x = self.backbone(x)
+        x = self.classifier(x)
+        return x
 
     def compute_loss(self, batch):
         images, labels = batch
@@ -130,7 +133,7 @@ def train(rank, world_size):
     df['rock_type'] = df['img_path'].apply(lambda x: x.split('/')[3])
     le = preprocessing.LabelEncoder()
     df['rock_type'] = le.fit_transform(df['rock_type'])
-    df = df.sample(5000)
+    df = df.sample(500)
     train_df, val_df = train_test_split(df, test_size=0.3, stratify=df['rock_type'], random_state=CFG['SEED'])
 
     # === transform ===
