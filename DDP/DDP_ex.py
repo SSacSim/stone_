@@ -133,7 +133,7 @@ def train(rank, world_size):
     df['rock_type'] = df['img_path'].apply(lambda x: x.split('/')[3])
     le = preprocessing.LabelEncoder()
     df['rock_type'] = le.fit_transform(df['rock_type'])
-    df = df.sample(500)
+    df = df.sample(40000)
     train_df, val_df = train_test_split(df, test_size=0.3, stratify=df['rock_type'], random_state=CFG['SEED'])
 
     # === transform ===
