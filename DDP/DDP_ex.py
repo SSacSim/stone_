@@ -28,7 +28,7 @@ from torchmetrics.classification import MulticlassF1Score
 def setup(rank, world_size):
     os.environ["MASTER_ADDR"] = "localhost"
     os.environ["MASTER_PORT"] = "12355"
-    dist.init_process_group("nccl", rank=rank, world_size=world_size)
+    dist.init_process_group("gloo", rank=rank, world_size=world_size)
     torch.cuda.set_device(rank)
 
 def cleanup():
@@ -38,10 +38,10 @@ def cleanup():
 
 CFG = {
     'IMG_SIZE': 448,
-    'EPOCHS': 15,
+    'EPOCHS': 30,
     'LEARNING_RATE': 1e-5,
-    'BATCH_SIZE': 8,
-    'SEED': 42,
+    'BATCH_SIZE': 4,
+    'SEED': 1042,
     'NUM_CLASSES': 7,
     'MODEL_NAME': 'eva02_large_patch14_448.mim_m38m_ft_in22k_in1k',
     'SAVE_PATH': './best_model.pth'
@@ -106,6 +106,7 @@ def validate(model, val_loader, rank):
 
     with torch.no_grad():
         for images, labels in tqdm(val_loader, desc=f"[GPU {rank}] validation"):
+            labels = labels.type(torch.LongTensor)
             images = images.to(rank, non_blocking=True)
             labels = labels.to(rank, non_blocking=True)
 
@@ -130,17 +131,26 @@ def train(rank, world_size):
     # === 데이터 준비 ===
     all_img_list = glob.glob('../data/train/*/*')
     df = pd.DataFrame({'img_path': all_img_list})
-    df['rock_type'] = df['img_path'].apply(lambda x: x.split('/')[3])
+    df['rock_type'] = df['img_path'].apply(lambda x: x.split('\\')[1])
     le = preprocessing.LabelEncoder()
     df['rock_type'] = le.fit_transform(df['rock_type'])
-    df = df.sample(40000)
+    df = df.sample(50000 , random_state=42)
     train_df, val_df = train_test_split(df, test_size=0.3, stratify=df['rock_type'], random_state=CFG['SEED'])
 
     # === transform ===
     model_tmp = timm.create_model(CFG['MODEL_NAME'], pretrained=True)
     config = timm.data.resolve_data_config({}, model=model_tmp)
     train_transform = A.Compose([
-        A.Resize(CFG['IMG_SIZE'], CFG['IMG_SIZE']),
+        A.Resize(CFG['IMG_SIZE'], CFG['IMG_SIZE'] ,interpolation=cv2.INTER_CUBIC),
+        A.Affine(rotate=(-360,360),shear={"x": (-10, 10), "y": (-10, 10)}, border_mode = 1,p = 1 ),
+        A.GridDistortion(num_steps=5, distort_limit=0.2, p= 0.5),
+        A.Morphological(scale = (1,3), operation="erosion",p = 0.5),
+        A.HorizontalFlip(p=0.5),
+        A.VerticalFlip(p = 0.5),
+        A.RandomRotate90(p=0.5),
+        A.RandomBrightnessContrast(brightness_limit=0.2, contrast_limit=0.2, p=0.5),
+        A.CoarseDropout(num_holes_range=(3, 5) , p = 0.5 ),
+        A.RandomResizedCrop( size = (CFG['IMG_SIZE'], CFG['IMG_SIZE']), scale = (0.7,1),ratio=(0.75, 1.33), p=0.5),  # Random zoom effect
         A.Normalize(mean=config['mean'], std=config['std']),
         ToTensorV2()
     ])
@@ -152,13 +162,13 @@ def train(rank, world_size):
     train_sampler = DistributedSampler(train_dataset, num_replicas=world_size, rank=rank, shuffle=True)
     val_sampler = DistributedSampler(val_dataset, num_replicas=world_size, rank=rank, shuffle=False)
 
-    train_loader = DataLoader(train_dataset, batch_size=CFG['BATCH_SIZE'], sampler=train_sampler, num_workers=4, pin_memory=True)
-    val_loader = DataLoader(val_dataset, batch_size=CFG['BATCH_SIZE'], sampler=val_sampler, num_workers=4, pin_memory=True)
+    train_loader = DataLoader(train_dataset, batch_size=CFG['BATCH_SIZE'], sampler=train_sampler, num_workers=0, pin_memory=True)
+    val_loader = DataLoader(val_dataset, batch_size=CFG['BATCH_SIZE'], sampler=val_sampler, num_workers=0, pin_memory=True)
 
     # === 모델, 옵티마이저, DDP 래핑 ===
     model = LitModel(CFG['MODEL_NAME'], CFG['NUM_CLASSES']).to(rank)
     model = DDP(model, device_ids=[rank])
-    optimizer = optim.AdamW(model.parameters(), lr=CFG['LEARNING_RATE'])
+    optimizer = optimizer = torch.optim.AdamW(params = model.parameters(), lr = CFG["LEARNING_RATE"], weight_decay=0.05)
     scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=CFG['EPOCHS'])
 
     best_f1 = 0.0
@@ -170,6 +180,7 @@ def train(rank, world_size):
 
         for batch in tqdm(train_loader, desc=f"[GPU {rank}] Epoch {epoch+1}/{CFG['EPOCHS']}"):
             images, labels = batch
+            labels = labels.type(torch.LongTensor)
             images = images.to(rank, non_blocking=True)
             labels = labels.to(rank, non_blocking=True)
 
